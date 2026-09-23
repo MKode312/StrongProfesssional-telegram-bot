@@ -1,0 +1,20 @@
+env: "local"
+
+telegram:
+  token: ""
+
+postgres:
+  host: "localhost"
+  port: 5432
+  name: "str_prof"
+  user: "postgres"
+  password: ""
+  ssl_mode: "disable"
+
+smtp:
+  host: ""
+  port: 587
+  username: ""
+  password: ""
+  from: ""
+  company_email: ""
