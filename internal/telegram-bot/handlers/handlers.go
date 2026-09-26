@@ -18,6 +18,7 @@ import (
 const (
 	callbackMenu     = "menu"
 	callbackCatalog  = "catalog"
+	callbackSearch   = "search"
 	callbackCart     = "cart"
 	callbackCheckout = "checkout"
 	callbackContacts = "contacts"
@@ -40,15 +41,28 @@ type profileDraft struct {
 	field    string
 }
 
+type quantityDraft struct {
+	productID int64
+	capacity  string
+}
+
 type Handler struct {
-	log    *slog.Logger
-	orders *orders.Service
-	mu     sync.Mutex
-	drafts map[int64]profileDraft
+	log        *slog.Logger
+	orders     *orders.Service
+	mu         sync.Mutex
+	drafts     map[int64]profileDraft
+	searches   map[int64]bool
+	quantities map[int64]quantityDraft
 }
 
 func New(log *slog.Logger, service *orders.Service) *Handler {
-	return &Handler{log: log, orders: service, drafts: make(map[int64]profileDraft)}
+	return &Handler{
+		log:        log,
+		orders:     service,
+		drafts:     make(map[int64]profileDraft),
+		searches:   make(map[int64]bool),
+		quantities: make(map[int64]quantityDraft),
+	}
 }
 
 func (h *Handler) Handle(ctx context.Context, b *bot.Bot, update *models.Update) {
@@ -62,6 +76,12 @@ func (h *Handler) Handle(ctx context.Context, b *bot.Bot, update *models.Update)
 
 	chatID, userID := update.Message.Chat.ID, update.Message.From.ID
 	if h.handleProfile(ctx, b, chatID, userID, update.Message.Text) {
+		return
+	}
+	if h.handleSearch(ctx, b, chatID, userID, update.Message.Text) {
+		return
+	}
+	if h.handleQuantity(ctx, b, chatID, userID, update.Message.Text) {
 		return
 	}
 
@@ -88,11 +108,14 @@ func (h *Handler) handleCallback(ctx context.Context, b *bot.Bot, query *models.
 	_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{CallbackQueryID: query.ID})
 
 	chatID, userID, data := query.Message.Message.Chat.ID, query.From.ID, query.Data
+	h.clearTextInput(userID)
 	switch {
 	case data == callbackMenu:
 		h.showMainMenu(ctx, b, chatID, false)
 	case data == callbackCatalog:
 		h.showCatalog(ctx, b, chatID)
+	case data == callbackSearch:
+		h.startSearch(ctx, b, chatID, userID)
 	case data == callbackCart:
 		h.showCart(ctx, b, chatID, userID)
 	case data == callbackCheckout:
@@ -121,9 +144,17 @@ func (h *Handler) handleCallback(ctx context.Context, b *bot.Bot, query *models.
 		parts := strings.SplitN(data, ":", 4)
 		if len(parts) == 4 {
 			productID, err := strconv.ParseInt(parts[1], 10, 64)
-			quantity, quantityErr := strconv.Atoi(parts[3])
-			if err == nil && quantityErr == nil {
+			quantity, quantityOK := positiveInteger(parts[3])
+			if err == nil && quantityOK {
 				h.showConfirmation(ctx, b, chatID, productID, parts[2], quantity)
+			}
+		}
+	case strings.HasPrefix(data, "customqty:"):
+		parts := strings.SplitN(data, ":", 3)
+		if len(parts) == 3 {
+			productID, err := strconv.ParseInt(parts[1], 10, 64)
+			if err == nil {
+				h.startQuantityInput(ctx, b, chatID, userID, productID, parts[2])
 			}
 		}
 	case strings.HasPrefix(data, "add:"):
@@ -147,13 +178,68 @@ func (h *Handler) showMainMenu(ctx context.Context, b *bot.Bot, chatID int64, gr
 }
 
 func (h *Handler) showCatalog(ctx context.Context, b *bot.Bot, chatID int64) {
-	rows := make([][]models.InlineKeyboardButton, 0, len(catalogCategories)+2)
+	rows := make([][]models.InlineKeyboardButton, 0, len(catalogCategories)+3)
+	rows = append(rows, []models.InlineKeyboardButton{{Text: "🔎 Найти товар", CallbackData: callbackSearch}})
 	for _, category := range catalogCategories {
 		rows = append(rows, []models.InlineKeyboardButton{{Text: categoryLabels[category], CallbackData: fmt.Sprintf("category:%s", category)}})
 	}
 	rows = append(rows, []models.InlineKeyboardButton{{Text: "🛒 Корзина", CallbackData: callbackCart}})
 	rows = append(rows, []models.InlineKeyboardButton{{Text: "Главное меню", CallbackData: callbackMenu}})
 	h.sendMarkup(ctx, b, chatID, "Каталог товаров\nВыберите категорию.", rows)
+}
+
+func (h *Handler) startSearch(ctx context.Context, b *bot.Bot, chatID, userID int64) {
+	h.mu.Lock()
+	h.searches[userID] = true
+	h.mu.Unlock()
+	h.send(ctx, b, chatID, "Введите название желаемого товара или его часть.")
+}
+
+func (h *Handler) handleSearch(ctx context.Context, b *bot.Bot, chatID, userID int64, value string) bool {
+	h.mu.Lock()
+	waiting := h.searches[userID]
+	h.mu.Unlock()
+	if !waiting {
+		return false
+	}
+	if strings.HasPrefix(strings.TrimSpace(value), "/") {
+		h.mu.Lock()
+		delete(h.searches, userID)
+		h.mu.Unlock()
+		return false
+	}
+
+	keyword := strings.TrimSpace(value)
+	if keyword == "" {
+		h.send(ctx, b, chatID, "Название не должно быть пустым. Введите ключевое слово ещё раз.")
+		return true
+	}
+
+	products, err := h.orders.SearchProducts(ctx, keyword)
+	if err != nil {
+		h.fail(ctx, b, chatID, err)
+		return true
+	}
+	h.mu.Lock()
+	delete(h.searches, userID)
+	h.mu.Unlock()
+
+	if len(products) == 0 {
+		h.sendMarkup(ctx, b, chatID, fmt.Sprintf("По запросу «%s» ничего не найдено.", keyword), [][]models.InlineKeyboardButton{
+			{{Text: "Искать ещё", CallbackData: callbackSearch}},
+			{{Text: "Назад к каталогу", CallbackData: callbackCatalog}},
+		})
+		return true
+	}
+
+	rows := make([][]models.InlineKeyboardButton, 0, len(products)+2)
+	for _, product := range products {
+		rows = append(rows, []models.InlineKeyboardButton{{Text: product.Name, CallbackData: fmt.Sprintf("product:%d", product.ID)}})
+	}
+	rows = append(rows, []models.InlineKeyboardButton{{Text: "Искать ещё", CallbackData: callbackSearch}})
+	rows = append(rows, []models.InlineKeyboardButton{{Text: "Назад к каталогу", CallbackData: callbackCatalog}})
+	h.sendMarkup(ctx, b, chatID, fmt.Sprintf("Результаты поиска по запросу «%s». Выберите товар.", keyword), rows)
+	return true
 }
 
 func (h *Handler) showCategoryProducts(ctx context.Context, b *bot.Bot, chatID int64, category string) {
@@ -191,12 +277,46 @@ func (h *Handler) showCapacities(ctx context.Context, b *bot.Bot, chatID, produc
 }
 
 func (h *Handler) showQuantities(ctx context.Context, b *bot.Bot, chatID, productID int64, capacity string) {
-	rows := make([][]models.InlineKeyboardButton, 0, len(quantities)+1)
+	rows := make([][]models.InlineKeyboardButton, 0, len(quantities)+2)
 	for _, quantity := range quantities {
 		rows = append(rows, []models.InlineKeyboardButton{{Text: fmt.Sprintf("%d шт.", quantity), CallbackData: fmt.Sprintf("quantity:%d:%s:%d", productID, capacity, quantity)}})
 	}
+	rows = append(rows, []models.InlineKeyboardButton{{Text: "Ввести количество", CallbackData: fmt.Sprintf("customqty:%d:%s", productID, capacity)}})
 	rows = append(rows, []models.InlineKeyboardButton{{Text: "Назад к ёмкостям", CallbackData: fmt.Sprintf("product:%d", productID)}})
 	h.sendMarkup(ctx, b, chatID, "Выберите количество штук.", rows)
+}
+
+func (h *Handler) startQuantityInput(ctx context.Context, b *bot.Bot, chatID, userID, productID int64, capacity string) {
+	h.mu.Lock()
+	h.quantities[userID] = quantityDraft{productID: productID, capacity: capacity}
+	h.mu.Unlock()
+	h.send(ctx, b, chatID, "Введите количество штук целым положительным числом.")
+}
+
+func (h *Handler) handleQuantity(ctx context.Context, b *bot.Bot, chatID, userID int64, value string) bool {
+	h.mu.Lock()
+	draft, waiting := h.quantities[userID]
+	h.mu.Unlock()
+	if !waiting {
+		return false
+	}
+	if strings.HasPrefix(strings.TrimSpace(value), "/") {
+		h.mu.Lock()
+		delete(h.quantities, userID)
+		h.mu.Unlock()
+		return false
+	}
+
+	quantity, ok := positiveInteger(value)
+	if !ok {
+		h.send(ctx, b, chatID, "Количество должно быть целым числом больше нуля. Попробуйте ещё раз.")
+		return true
+	}
+	h.mu.Lock()
+	delete(h.quantities, userID)
+	h.mu.Unlock()
+	h.showConfirmation(ctx, b, chatID, draft.productID, draft.capacity, quantity)
+	return true
 }
 
 func (h *Handler) showConfirmation(ctx context.Context, b *bot.Bot, chatID, productID int64, capacity string, quantity int) {
@@ -219,8 +339,8 @@ func (h *Handler) addToCart(ctx context.Context, b *bot.Bot, chatID, userID int6
 		return
 	}
 	productID, err := strconv.ParseInt(parts[1], 10, 64)
-	quantity, quantityErr := strconv.Atoi(parts[3])
-	if err != nil || quantityErr != nil {
+	quantity, quantityOK := positiveInteger(parts[3])
+	if err != nil || !quantityOK {
 		return
 	}
 	if err := h.orders.AddToCart(ctx, userID, productID, parts[2], quantity); err != nil {
@@ -440,8 +560,34 @@ func (h *Handler) fail(ctx context.Context, b *bot.Bot, chatID int64, err error)
 	h.send(ctx, b, chatID, "Не удалось выполнить операцию. Попробуйте ещё раз позднее.")
 }
 
+func (h *Handler) clearTextInput(userID int64) {
+	h.mu.Lock()
+	delete(h.drafts, userID)
+	delete(h.searches, userID)
+	delete(h.quantities, userID)
+	h.mu.Unlock()
+}
+
 func callbackID(data, prefix string) (int64, error) {
 	return strconv.ParseInt(strings.TrimPrefix(data, prefix), 10, 64)
+}
+
+func positiveInteger(value string) (int, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, false
+	}
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			return 0, false
+		}
+	}
+	parsed, err := strconv.ParseInt(value, 10, 32)
+	quantity := int(parsed)
+	if err != nil || quantity <= 0 {
+		return 0, false
+	}
+	return quantity, true
 }
 
 func money(kopecks int64) string {

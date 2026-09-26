@@ -1,8 +1,3 @@
--- Column "category" is created in 001_init.sql for new databases.
--- On an existing database, run once as the table owner:
---   docker compose exec postgres psql -U postgres -d str_prof \
---     -c "ALTER TABLE products ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT '';"
-
 DO $$
 BEGIN
     IF NOT EXISTS (

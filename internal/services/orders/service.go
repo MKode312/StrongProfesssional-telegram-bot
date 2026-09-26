@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"strings"
 
 	"str-prof-bot/internal/domain"
 	"str-prof-bot/internal/services/mailer"
@@ -26,6 +27,13 @@ func (s *Service) Products(ctx context.Context) ([]domain.Product, error) {
 
 func (s *Service) ProductsByCategory(ctx context.Context, category string) ([]domain.Product, error) {
 	return s.storage.ProductsByCategory(ctx, category)
+}
+func (s *Service) SearchProducts(ctx context.Context, keyword string) ([]domain.Product, error) {
+	keyword = strings.TrimSpace(keyword)
+	if keyword == "" {
+		return []domain.Product{}, nil
+	}
+	return s.storage.SearchProducts(ctx, keyword)
 }
 func (s *Service) AddToCart(ctx context.Context, userID, productID int64, capacity string, quantity int) error {
 	return s.storage.AddToCart(ctx, userID, productID, capacity, quantity)

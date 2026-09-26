@@ -4,7 +4,7 @@ telegram:
   token: ""
 
 postgres:
-  host: "localhost"
+  host: "postgres"
   port: 5432
   name: "str_prof"
   user: "postgres"

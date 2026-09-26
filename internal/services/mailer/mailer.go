@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/wneessen/go-mail"
 	"str-prof-bot/internal/config"
@@ -20,12 +21,20 @@ type Service struct {
 }
 
 func New(log *slog.Logger, cfg config.SMTPConfig) (*Service, error) {
-	client, err := mail.NewClient(cfg.Host,
+	options := []mail.Option{
 		mail.WithPort(cfg.Port),
-		mail.WithSMTPAuth(mail.SMTPAuthPlain),
+		mail.WithSMTPAuth(mail.SMTPAuthAutoDiscover),
 		mail.WithUsername(cfg.Username),
 		mail.WithPassword(cfg.Password),
-	)
+		mail.WithTimeout(10 * time.Second),
+	}
+	if cfg.Port == 465 {
+		options = append(options, mail.WithSSL())
+	} else {
+		options = append(options, mail.WithTLSPolicy(mail.TLSMandatory))
+	}
+
+	client, err := mail.NewClient(cfg.Host, options...)
 	if err != nil {
 		return nil, fmt.Errorf("create SMTP client: %w", err)
 	}

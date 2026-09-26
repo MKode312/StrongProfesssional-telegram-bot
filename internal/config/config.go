@@ -3,7 +3,10 @@ package config
 import (
 	"errors"
 	"flag"
+	"net"
+	"net/url"
 	"os"
+	"strconv"
 
 	"github.com/ilyakaznacheev/cleanenv"
 	"github.com/joho/godotenv"
@@ -21,12 +24,26 @@ type TelegramConfig struct {
 }
 
 type PostgresConfig struct {
-	Host     string `yaml:"host" env:"POSTGRES_HOST" env-default:"localhost"`
+	Host     string `yaml:"host" env:"POSTGRES_HOST" env-default:"postgres"`
 	Port     uint16 `yaml:"port" env:"POSTGRES_PORT" env-default:"5432"`
 	Name     string `yaml:"name" env:"POSTGRES_DB" env-required:"true"`
 	User     string `yaml:"user" env:"POSTGRES_USER" env-required:"true"`
 	Password string `yaml:"password" env:"POSTGRES_PASSWORD" env-required:"true"`
 	SSLMode  string `yaml:"ssl_mode" env:"POSTGRES_SSL_MODE" env-default:"disable"`
+}
+
+func (c PostgresConfig) URL() string {
+	dsn := &url.URL{
+		Scheme: "postgres",
+		User:   url.UserPassword(c.User, c.Password),
+		Host:   net.JoinHostPort(c.Host, strconv.FormatUint(uint64(c.Port), 10)),
+		Path:   c.Name,
+	}
+	query := dsn.Query()
+	query.Set("sslmode", c.SSLMode)
+	dsn.RawQuery = query.Encode()
+
+	return dsn.String()
 }
 
 type SMTPConfig struct {
@@ -39,6 +56,22 @@ type SMTPConfig struct {
 }
 
 func MustLoad() *Config {
+	var cfg Config
+	mustLoad(&cfg)
+
+	return &cfg
+}
+
+func MustLoadPostgres() PostgresConfig {
+	var cfg struct {
+		Postgres PostgresConfig `yaml:"postgres"`
+	}
+	mustLoad(&cfg)
+
+	return cfg.Postgres
+}
+
+func mustLoad(cfg any) {
 	if err := godotenv.Load(); err != nil && !errors.Is(err, os.ErrNotExist) {
 		panic("load .env: " + err.Error())
 	}
@@ -51,9 +84,7 @@ func MustLoad() *Config {
 		panic("config file: " + err.Error())
 	}
 
-	var cfg Config
-	if err := cleanenv.ReadConfig(path, &cfg); err != nil {
+	if err := cleanenv.ReadConfig(path, cfg); err != nil {
 		panic("read configuration: " + err.Error())
 	}
-	return &cfg
 }

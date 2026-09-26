@@ -36,6 +36,24 @@ func (s *Storage) Products(ctx context.Context) ([]domain.Product, error) {
 	return products, nil
 }
 
+func (s *Storage) SearchProducts(ctx context.Context, keyword string) ([]domain.Product, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, name, description, price, category
+		FROM products
+		WHERE active = true AND position(lower($1) in lower(name)) > 0
+		ORDER BY name`, keyword)
+	if err != nil {
+		return nil, fmt.Errorf("search products: %w", err)
+	}
+	defer rows.Close()
+
+	products, err := pgx.CollectRows(rows, pgx.RowToStructByPos[domain.Product])
+	if err != nil {
+		return nil, fmt.Errorf("collect searched products: %w", err)
+	}
+	return products, nil
+}
+
 func (s *Storage) AddToCart(ctx context.Context, telegramID, productID int64, capacity string, quantity int) error {
 	if quantity <= 0 {
 		return fmt.Errorf("cart quantity must be positive")

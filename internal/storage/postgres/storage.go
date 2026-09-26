@@ -11,8 +11,7 @@ import (
 type Storage struct{ pool *pgxpool.Pool }
 
 func New(ctx context.Context, cfg config.PostgresConfig) (*Storage, error) {
-	dsn := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s", cfg.User, cfg.Password, cfg.Host, cfg.Port, cfg.Name, cfg.SSLMode)
-	pool, err := pgxpool.New(ctx, dsn)
+	pool, err := pgxpool.New(ctx, cfg.URL())
 	if err != nil {
 		return nil, fmt.Errorf("connect postgres: %w", err)
 	}
